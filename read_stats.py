@@ -1,43 +1,101 @@
-import json
-import requests
 import datetime
-import os.path
+import json
 import os
 
+import requests
+from google.api_core.exceptions import NotFound, AlreadyExists
+from google.cloud import secretmanager_v1
 
 strava_based_url = os.environ.get('STRAVA_BASED_URL', 'https://www.strava.com')
 client_id = os.environ.get('STRAVA_CLIENT_ID', None)
 client_secret = os.environ.get('STRAVA_CLIENT_SECRET', None)
 client_code = os.environ.get('STRAVA_CLIENT_CODE', None)
+gcp_project = os.environ.get('GCP_PROJECT', None)
+
+client = secretmanager_v1.SecretManagerServiceClient()
+
+class AuthDetails:
+    expires_at = None
+    access_token = None
+    refresh_token = None
+
+    def __init__(self, expires_at, access_token, refresh_token):
+        self.expires_at = expires_at
+        self.access_token = access_token
+        self.refresh_token = refresh_token
+
+
+def get_auth_details():
+    expires_at = get_secret("expires_at")
+    access_token = get_secret("access_token")
+    refresh_token = get_secret("refresh_token")
+    return AuthDetails(expires_at, access_token, refresh_token)
+
+
+def get_secret(secret_id):
+    request = secretmanager_v1.AccessSecretVersionRequest(
+        name=f'projects/{gcp_project}/secrets/{secret_id}/versions/latest'
+    )
+
+    try:
+        response = client.access_secret_version(request=request)
+        return response.payload.data.decode("utf-8")
+    except NotFound as e:
+        print(f'Secret {secret_id} not found')
+        return None
+
+
+def create_secret(secret_id, secret_value):
+    try:
+        response = client.create_secret(
+            request={
+                "parent": f"projects/{gcp_project}",
+                "secret_id": secret_id,
+                "secret": {"replication": {"automatic": {}}},
+            }
+        )
+        print("Created secret: {}".format(response.name))
+    except AlreadyExists as e:
+        print("The secret {} already exists", secret_id)
+
+    payload = str(secret_value).encode("UTF-8")
+    response = client.add_secret_version(
+        request={
+            "parent": client.secret_path(gcp_project, secret_id),
+            "payload": {"data": payload}
+        }
+    )
+
+    print("Added secret version: {}".format(response.name))
+
+
+def save_auth_details(auth_details):
+    create_secret("expires_at", auth_details.expires_at)
+    create_secret("access_token", auth_details.access_token)
+    create_secret("refresh_token", auth_details.refresh_token)
 
 
 def get_auth_token():
-    if os.path.isfile('tokens_cache.json'):
-        with open("tokens_cache.json", "r") as f:
-            json_object = json.load(f)
-            expires_at = datetime.datetime.utcfromtimestamp(json_object['expires_at'])
-            if expires_at.timestamp() > datetime.datetime.now(expires_at.tzinfo).timestamp():
-                return json_object['access_token']
-            else:
-                url = f"{strava_based_url}/api/v3/oauth/token?client_id={client_id}&client_secret={client_secret}" \
-                      f"&grant_type=refresh_token&refresh_token={json_object['refresh_token']}"
+    auth_details = get_auth_details()
+    if auth_details.expires_at is None:
+        url = f"{strava_based_url}/oauth/token?client_id={client_id}&client_secret={client_secret}" \
+              f"&code={client_code}&grant_type=authorization_code"
+        response = requests.request("POST", url)
+        auth_details = AuthDetails(response.json()['expires_at'], response.json()['access_token'],
+                                   response.json()['refresh_token'])
+        save_auth_details(auth_details)
+    else:
+        expires_at = datetime.datetime.utcfromtimestamp(int(auth_details.expires_at))
+        if expires_at.timestamp() < datetime.datetime.now(expires_at.tzinfo).timestamp():
+            url = f"{strava_based_url}/api/v3/oauth/token?client_id={client_id}&client_secret={client_secret}" \
+                  f"&grant_type=refresh_token&refresh_token={auth_details.refresh_token}"
 
-                response = requests.request("POST", url)
-                json_object['refresh_token'] = response.json()['refresh_token']
-                json_object['access_token'] = response.json()['access_token']
-                json_object['expires_at'] = response.json()['expires_at']
-                with open("tokens_cache.json", "w") as outfile:
-                    to_be_written = json.dumps(json_object, indent=4)
-                    outfile.write(to_be_written)
-                return json_object['access_token']
+            response = requests.request("POST", url)
+            auth_details = AuthDetails(response.json()['expires_at'], response.json()['access_token'],
+                                       response.json()['refresh_token'])
+            save_auth_details(auth_details)
 
-    url = f"{strava_based_url}/oauth/token?client_id={client_id}&client_secret={client_secret}" \
-          f"&code={client_code}&grant_type=authorization_code"
-    response = requests.request("POST", url)
-    json_object = json.dumps(response.json(), indent=4)
-    with open("tokens_cache.json", "w") as outfile:
-        outfile.write(json_object)
-    return response.json()['access_token']
+    return auth_details.access_token
 
 
 def created_time_limit_query(year):
