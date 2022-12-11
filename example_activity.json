@@ -1,0 +1,62 @@
+{
+  'resource_state': 2,
+  'athlete': {
+    'id': 32460260,
+    'resource_state': 1
+  },
+  'name': 'Herastrau evening 03.11',
+  'distance': 22041.8,
+  'moving_time': 4039,
+  'elapsed_time': 4052,
+  'total_elevation_gain': 78.7,
+  'type': 'Ride',
+  'sport_type': 'Ride',
+  'workout_type': 10,
+  'id': 1943490904,
+  'start_date': '2018-11-03T14:27:09Z',
+  'start_date_local': '2018-11-03T16:27:09Z',
+  'timezone': '(GMT+02:00) Europe/Bucharest',
+  'utc_offset': 7200.0,
+  'location_city': None,
+  'location_state': None,
+  'location_country': None,
+  'achievement_count': 9,
+  'kudos_count': 0,
+  'comment_count': 0,
+  'athlete_count': 1,
+  'photo_count': 0,
+  'map': {
+    'id': 'a1943490904',
+    'summary_polyline': 's_lnGmpd~CkBfDsTvJul@hR_`@iTef@ePdHu_@s\\iGvQu[~DaCr[eE|u@wBjK|KdF~P`d@~GpCzDuDrf@aGbGiw@r[yEAoa@_Uoc@oNh@cLjE_Su\\oHjCuG|QgUfPuD~}@mE`Et@xItJjGbRlc@vG~BdDoBha@}C~Is|@b^gGEg_@kTic@aOvAkR`BsDhHz@fCcF`DqA`J~@xNzMjCrGpB|NbJsCdGj@~@iVqDsR~DiOtE}EpKuA|ElJ',
+    'resource_state': 2
+  },
+  'trainer': False,
+  'commute': False,
+  'manual': False,
+  'private': False,
+  'visibility': 'everyone',
+  'flagged': False,
+  'gear_id': None,
+  'start_latlng': [
+    44.467309,
+    26.078956
+  ],
+  'end_latlng': [
+    44.472762,
+    26.087557
+  ],
+  'average_speed': 5.457,
+  'max_speed': 12.5,
+  'has_heartrate': False,
+  'heartrate_opt_out': False,
+  'display_hide_heartrate_option': False,
+  'elev_high': 90.0,
+  'elev_low': 73.6,
+  'upload_id': 2079359274,
+  'upload_id_str': '2079359274',
+  'external_id': '1c645514f9526778854909a092a07f89',
+  'from_accepted_tag': False,
+  'pr_count': 3,
+  'total_photo_count': 0,
+  'has_kudoed': False
+}

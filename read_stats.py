@@ -1,18 +1,26 @@
-import datetime
 import json
 import os
+from datetime import datetime, timezone
 
 import requests
 from google.api_core.exceptions import NotFound, AlreadyExists
-from google.cloud import secretmanager_v1
+from google.cloud import secretmanager_v1, bigquery
+
+gcp_project = os.environ.get('GCP_PROJECT', None)
 
 strava_based_url = os.environ.get('STRAVA_BASED_URL', 'https://www.strava.com')
 client_id = os.environ.get('STRAVA_CLIENT_ID', None)
 client_secret = os.environ.get('STRAVA_CLIENT_SECRET', None)
 client_code = os.environ.get('STRAVA_CLIENT_CODE', None)
-gcp_project = os.environ.get('GCP_PROJECT', None)
 
-client = secretmanager_v1.SecretManagerServiceClient()
+bq_dataset = os.environ.get('INGESTION_DATA_SET', None)
+bq_table = os.environ.get('INGESTION_TABLE', None)
+bq_table_id = f"{gcp_project}.{bq_dataset}.{bq_table}"
+
+# client initiation
+client_secret_manager = secretmanager_v1.SecretManagerServiceClient()
+client_bq = bigquery.Client()
+
 
 class AuthDetails:
     expires_at = None
@@ -38,7 +46,7 @@ def get_secret(secret_id):
     )
 
     try:
-        response = client.access_secret_version(request=request)
+        response = client_secret_manager.access_secret_version(request=request)
         return response.payload.data.decode("utf-8")
     except NotFound as e:
         print(f'Secret {secret_id} not found')
@@ -47,26 +55,26 @@ def get_secret(secret_id):
 
 def create_secret(secret_id, secret_value):
     try:
-        response = client.create_secret(
+        response = client_secret_manager.create_secret(
             request={
                 "parent": f"projects/{gcp_project}",
                 "secret_id": secret_id,
                 "secret": {"replication": {"automatic": {}}},
             }
         )
-        print("Created secret: {}".format(response.name))
+        print(f"Created secret: {response.name}")
     except AlreadyExists as e:
-        print("The secret {} already exists", secret_id)
+        print(f"The secret {secret_id} already exists")
 
     payload = str(secret_value).encode("UTF-8")
-    response = client.add_secret_version(
+    response = client_secret_manager.add_secret_version(
         request={
-            "parent": client.secret_path(gcp_project, secret_id),
+            "parent": client_secret_manager.secret_path(gcp_project, secret_id),
             "payload": {"data": payload}
         }
     )
 
-    print("Added secret version: {}".format(response.name))
+    print(f"Added secret version: {response.name}")
 
 
 def save_auth_details(auth_details):
@@ -85,8 +93,8 @@ def get_auth_token():
                                    response.json()['refresh_token'])
         save_auth_details(auth_details)
     else:
-        expires_at = datetime.datetime.utcfromtimestamp(int(auth_details.expires_at))
-        if expires_at.timestamp() < datetime.datetime.now(expires_at.tzinfo).timestamp():
+        expires_at = datetime.fromtimestamp(int(auth_details.expires_at)).replace(tzinfo=timezone.utc)
+        if expires_at.timestamp() < datetime.now(expires_at.tzinfo).timestamp():
             url = f"{strava_based_url}/api/v3/oauth/token?client_id={client_id}&client_secret={client_secret}" \
                   f"&grant_type=refresh_token&refresh_token={auth_details.refresh_token}"
 
@@ -98,52 +106,139 @@ def get_auth_token():
     return auth_details.access_token
 
 
-def created_time_limit_query(year):
-    before = datetime.datetime(year, 12, 31, 0, 0).strftime('%s')
-    after = datetime.datetime(year, 1, 1, 0, 0).strftime('%s')
+def created_time_limit_query():
+    query_job = client_bq.query(f'SELECT start_date FROM `{bq_table_id}` ORDER BY start_date DESC LIMIT 1 ')
 
-    return f'before={before}&after={after}'
+    rows = query_job.result()
+    rows_list = list(rows)
+
+    last_fetched_time = None
+    if rows_list:
+        row = rows_list[0]
+        last_fetched_time = row.start_date.replace(tzinfo=timezone.utc)
+    else:
+        last_fetched_time = datetime(2010, 1, 1, tzinfo=timezone.utc)
+
+    return str(last_fetched_time.timestamp())
 
 
-def get_activities(year):
-    time_limit_query = created_time_limit_query(year)
-    url = f"{strava_based_url}/api/v3/athlete/activities?{time_limit_query}&per_page=200"
+def get_latest_activities():
+    time_limit_query = created_time_limit_query()
+    url = f"{strava_based_url}/api/v3/athlete/activities?after={time_limit_query}&per_page=200"
     auth_token = get_auth_token()
     headers = {
         'Authorization': f'Bearer {auth_token}'
     }
     response = requests.request("GET", url, headers=headers)
-    return response.text
+    return json.loads(response.text)
 
 
-def extract_stats(activities_json, year):
-    data = json.loads(activities_json)
-    total_distance = 0
-    total_elevation_gain = 0
-    total_moving_time = 0
-    count_activities = 0
-    for i in data:
-        if i['type'] == 'Ride':
-            total_distance += i['distance']
-            total_elevation_gain += i['total_elevation_gain']
-            total_moving_time += i['moving_time']
-            count_activities += 1
-    print('--------------')
-    print(f"for year {year}")
-    print(f"total activities {count_activities}")
-    print('total distance')
-    print(("%.2f km" % (total_distance / 1000)))
-    print('total elevation gain')
-    print(("%.2f km" % (total_elevation_gain / 1000)))
-    print('total moving time')
-    print(f"{str(datetime.timedelta(seconds=total_moving_time))}")
+def process(activities):
+    for activity in activities:
+        persist_activity(activity)
 
 
-def process_stats(starting_year, ending_year):
-    for year in range(starting_year, ending_year):
-        json_data = get_activities(year)
-        extract_stats(json_data, year)
+def if_table_exists(table_name):
+    #TODO fix deprecation
+    dataset = client_bq.dataset(bq_dataset, gcp_project)
+    table_ref = dataset.table(table_name)
+    try:
+        client_bq.get_table(table_ref)
+        return True
+    except NotFound:
+        return False
+
+
+def persist_activity(activity):
+    start_date_local = datetime.strptime(activity['start_date_local'], '%Y-%m-%dT%H:%M:%SZ')
+    start_date = datetime.strptime(activity['start_date'], '%Y-%m-%dT%H:%M:%SZ')
+    ingestion_time = datetime.utcnow().replace(tzinfo=timezone.utc)
+    id = activity['id']
+
+    row_to_insert = {
+        "ingestion_time": str(ingestion_time.timestamp()),
+        "name": activity['name'],
+        "distance": activity['distance'],
+        "moving_time": activity['moving_time'],
+        "elapsed_time": activity['elapsed_time'],
+        "total_elevation_gain": activity['total_elevation_gain'],
+        "type": activity['type'],
+        "sport_type": activity['sport_type'],
+        "id": id,
+        "start_date": str(start_date),
+        "start_date_local": str(start_date_local),
+        "timezone": activity['timezone'],
+        "utc_offset": activity['utc_offset'],
+        "kudos_count": activity['kudos_count'],
+        "comment_count": activity['comment_count'],
+        "visibility": activity['visibility'],
+        "start_lat": None if len(activity['start_latlng']) == 0 else activity['start_latlng'][0],
+        "start_lng": None if len(activity['start_latlng']) == 0 else activity['start_latlng'][1],
+        "end_lat": None if len(activity['end_latlng']) == 0 else activity['end_latlng'][0],
+        "end_lng": None if len(activity['end_latlng']) == 0 else activity['end_latlng'][1],
+        "average_speed": activity['average_speed'],
+        "max_speed": activity['max_speed'],
+        "elev_high": None if "elev_high" not in activity else activity['elev_high'],
+        "elev_low": None if "elev_low" not in activity else activity['elev_low'],
+        "total_photo_count": activity['total_photo_count']
+    }
+
+    errors = client_bq.insert_rows_json(bq_table_id, [row_to_insert])
+    if not errors:
+        print(f"New rows have been added with id {id} and ingestion time {ingestion_time}.")
+    else:
+        print(f"Encountered errors while inserting rows with {id} and {ingestion_time} = {errors})")
+
+
+def create_table_if_not_exists():
+    schema = [
+        bigquery.SchemaField("ingestion_time", "TIMESTAMP", mode="REQUIRED"),
+        bigquery.SchemaField("name", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("distance", "FLOAT64", mode="REQUIRED"),
+        bigquery.SchemaField("moving_time", "INTEGER", mode="REQUIRED"),
+        bigquery.SchemaField("elapsed_time", "INTEGER", mode="REQUIRED"),
+        bigquery.SchemaField("total_elevation_gain", "FLOAT64", mode="REQUIRED"),
+        bigquery.SchemaField("type", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("sport_type", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("start_date", "DATETIME", mode="REQUIRED"),
+        bigquery.SchemaField("start_date_local", "DATETIME", mode="REQUIRED"),
+        bigquery.SchemaField("timezone", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("utc_offset", "FLOAT64", mode="REQUIRED"),
+        bigquery.SchemaField("kudos_count", "INTEGER", mode="REQUIRED"),
+        bigquery.SchemaField("comment_count", "INTEGER", mode="REQUIRED"),
+        bigquery.SchemaField("visibility", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("start_lat", "FLOAT64", mode="NULLABLE"),
+        bigquery.SchemaField("start_lng", "FLOAT64", mode="NULLABLE"),
+        bigquery.SchemaField("end_lat", "FLOAT64", mode="NULLABLE"),
+        bigquery.SchemaField("end_lng", "FLOAT64", mode="NULLABLE"),
+        bigquery.SchemaField("average_speed", "FLOAT64", mode="REQUIRED"),
+        bigquery.SchemaField("max_speed", "FLOAT64", mode="REQUIRED"),
+        bigquery.SchemaField("elev_high", "FLOAT64", mode="NULLABLE"),
+        bigquery.SchemaField("elev_low", "FLOAT64", mode="NULLABLE"),
+        bigquery.SchemaField("total_photo_count", "INTEGER", mode="REQUIRED")
+    ]
+
+    if not if_table_exists(bq_table):
+        table = bigquery.Table(bq_table_id, schema=schema)
+        table = client_bq.create_table(table)
+        table.time_partitioning = bigquery.TimePartitioning(
+            type_=bigquery.TimePartitioningType.DAY,
+            field="ingestion_time",
+            expiration_ms=7776000000,
+        )
+        print(
+            "Created table {}.{}.{}".format(table.project, table.dataset_id, table.table_id)
+        )
+    else:
+        print("Table already exits, will not be recreated.")
+
+
+def init(data=None, context=None):
+    create_table_if_not_exists()
+    activities = get_latest_activities()
+    process(activities)
 
 
 if __name__ == '__main__':
-    process_stats(2017, 2023)
+    init()
