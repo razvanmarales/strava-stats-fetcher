@@ -9,5 +9,5 @@ steps:
   - --source=.
   - --runtime=python39
   - --project=impressive-hall-298918
-  options:
-    logging: CLOUD_LOGGING_ONLY
+options:
+  logging: CLOUD_LOGGING_ONLY
