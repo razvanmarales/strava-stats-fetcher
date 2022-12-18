@@ -7,4 +7,5 @@ steps:
   - strava-stats-fetcher
   - --region=europe-central2
   - --source=.
-  - --runtime=python37
+  - --runtime=python39
+  - --project=impressive-hall-298918
