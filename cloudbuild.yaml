@@ -1,0 +1,10 @@
+steps:
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  args:
+  - gcloud
+  - functions
+  - deploy
+  - strava-stats-fetcher
+  - --region=europe-central2
+  - --source=.
+  - --runtime=python37
