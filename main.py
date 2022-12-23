@@ -140,7 +140,7 @@ def process(activities):
 
 def if_table_exists(table_name):
     #TODO fix deprecation
-    dataset = client_bq.dataset(bq_dataset, gcp_project)
+    dataset = client_bq.get_dataset(f"{gcp_project}.{bq_dataset}")
     table_ref = dataset.table(table_name)
     try:
         client_bq.get_table(table_ref)
