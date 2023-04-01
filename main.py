@@ -3,8 +3,12 @@ import os
 from datetime import datetime, timezone
 
 import requests
-from google.api_core.exceptions import NotFound, AlreadyExists
-from google.cloud import secretmanager_v1, bigquery
+from google.api_core.exceptions import NotFound
+from google.cloud import bigquery
+
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import firestore
 
 gcp_project = os.environ.get('GCP_PROJECT', None)
 
@@ -18,8 +22,10 @@ bq_table = os.environ.get('INGESTION_TABLE', None)
 bq_table_id = f"{gcp_project}.{bq_dataset}.{bq_table}"
 
 # client initiation
-client_secret_manager = secretmanager_v1.SecretManagerServiceClient()
 client_bq = bigquery.Client()
+cred = credentials.ApplicationDefault()
+firebase_admin.initialize_app(cred)
+firebase = firestore.client()
 
 
 class AuthDetails:
@@ -34,74 +40,39 @@ class AuthDetails:
 
 
 def get_auth_details():
-    expires_at = get_secret("expires_at")
-    access_token = get_secret("access_token")
-    refresh_token = get_secret("refresh_token")
-    return AuthDetails(expires_at, access_token, refresh_token)
+    users_ref = firebase.collection(u'strava_credentials').document("main")
 
-
-def get_secret(secret_id):
-    request = secretmanager_v1.AccessSecretVersionRequest(
-        name=f'projects/{gcp_project}/secrets/{secret_id}/versions/latest'
-    )
-
-    try:
-        response = client_secret_manager.access_secret_version(request=request)
-        return response.payload.data.decode("utf-8")
-    except NotFound as e:
-        print(f'Secret {secret_id} not found')
+    doc = users_ref.get()
+    if doc.exists:
+        expires_at = doc.to_dict().get('expires_at', None)
+        access_token = doc.to_dict().get('access_token', None)
+        refresh_token = doc.to_dict().get('refresh_token', None)
+        return AuthDetails(expires_at, access_token, refresh_token)
+    else:
+        print(u'No such document!')
         return None
 
 
-def create_secret(secret_id, secret_value):
-    try:
-        response = client_secret_manager.create_secret(
-            request={
-                "parent": f"projects/{gcp_project}",
-                "secret_id": secret_id,
-                "secret": {"replication": {"automatic": {}}},
-            }
-        )
-        print(f"Created secret: {response.name}")
-    except AlreadyExists as e:
-        print(f"The secret {secret_id} already exists")
-
-    payload = str(secret_value).encode("UTF-8")
-    response = client_secret_manager.add_secret_version(
-        request={
-            "parent": client_secret_manager.secret_path(gcp_project, secret_id),
-            "payload": {"data": payload}
-        }
-    )
-
-    print(f"Added secret version: {response.name}")
-
-
 def save_auth_details(auth_details):
-    create_secret("expires_at", auth_details.expires_at)
-    create_secret("access_token", auth_details.access_token)
-    create_secret("refresh_token", auth_details.refresh_token)
+    doc_ref = firebase.collection(u'strava_credentials').document(u'main')
+    doc_ref.set({
+        "expires_at": auth_details.expires_at,
+        "access_token": auth_details.access_token,
+        "refresh_token": auth_details.refresh_token
+    })
 
 
 def get_auth_token():
     auth_details = get_auth_details()
-    if auth_details.expires_at is None:
-        url = f"{strava_based_url}/oauth/token?client_id={client_id}&client_secret={client_secret}" \
-              f"&code={client_code}&grant_type=authorization_code"
+    expires_at = datetime.fromtimestamp(int(auth_details.expires_at)).replace(tzinfo=timezone.utc)
+    if expires_at.timestamp() < datetime.now(expires_at.tzinfo).timestamp():
+        url = f"{strava_based_url}/api/v3/oauth/token?client_id={client_id}&client_secret={client_secret}" \
+              f"&grant_type=refresh_token&refresh_token={auth_details.refresh_token}"
+
         response = requests.request("POST", url)
         auth_details = AuthDetails(response.json()['expires_at'], response.json()['access_token'],
                                    response.json()['refresh_token'])
         save_auth_details(auth_details)
-    else:
-        expires_at = datetime.fromtimestamp(int(auth_details.expires_at)).replace(tzinfo=timezone.utc)
-        if expires_at.timestamp() < datetime.now(expires_at.tzinfo).timestamp():
-            url = f"{strava_based_url}/api/v3/oauth/token?client_id={client_id}&client_secret={client_secret}" \
-                  f"&grant_type=refresh_token&refresh_token={auth_details.refresh_token}"
-
-            response = requests.request("POST", url)
-            auth_details = AuthDetails(response.json()['expires_at'], response.json()['access_token'],
-                                       response.json()['refresh_token'])
-            save_auth_details(auth_details)
 
     return auth_details.access_token
 
